@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0.0",
+  "FriendlyName": "SIL UDP Bridge",
+  "Description": "Receives timestamped vehicle poses over UDP and applies them to an Unreal actor.",
+  "Category": "Simulation",
+  "CreatedBy": "mags",
+  "EnabledByDefault": true,
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Modules": [
+    {
+      "Name": "SimUdpBridge",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
