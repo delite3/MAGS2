@@ -2,6 +2,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import time
 
 
 BASE_URL = "http://172.27.240.1:30010"
@@ -64,16 +65,16 @@ def main():
 
     print(f"Original location: {original_location}")
     print(f"Original rotation: {original_rotation}")
+    
 
     moved_location = dict(original_location)
-    moved_location["X"] += 200.0  # Move two metres along X.
+    for _ in range(5):
+        moved_location["X"] += 200.0  # Move two metres along X.
 
-    import time
-
-    start = time.perf_counter()
-    set_property("VehicleLocation", moved_location)
-    elapsed_ms = (time.perf_counter() - start) * 1000
-    print(f"PUT response: {elapsed_ms:.2f} ms")
+        start = time.perf_counter()
+        set_property("VehicleLocation", moved_location)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        print(f"PUT response: {elapsed_ms:.2f} ms")
 
     confirmed_location = get_property("VehicleLocation")
     print(f"Moved location:    {confirmed_location}")

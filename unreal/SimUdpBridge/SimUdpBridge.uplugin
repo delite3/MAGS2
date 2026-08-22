@@ -1,9 +1,9 @@
 {
   "FileVersion": 3,
-  "Version": 1,
-  "VersionName": "1.0.0",
+  "Version": 2,
+  "VersionName": "0.2.0-poc",
   "FriendlyName": "SIL UDP Bridge",
-  "Description": "Receives timestamped vehicle poses over UDP and applies them to an Unreal actor.",
+  "Description": "Receives versioned pose commands over UDP and applies them to an Unreal actor.",
   "Category": "Simulation",
   "CreatedBy": "mags",
   "EnabledByDefault": true,
@@ -13,7 +13,8 @@
     {
       "Name": "SimUdpBridge",
       "Type": "Runtime",
-      "LoadingPhase": "Default"
+      "LoadingPhase": "Default",
+      "PlatformAllowList": ["Win64"]
     }
   ]
 }

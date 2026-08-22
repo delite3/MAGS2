@@ -1,6 +1,7 @@
 #include "SimUdpControlledActor.h"
 
 #include "Common/UdpSocketBuilder.h"
+#include "Components/SceneComponent.h"
 #include "IPAddress.h"
 #include "Interfaces/IPv4/IPv4Address.h"
 #include "Interfaces/IPv4/IPv4Endpoint.h"
@@ -11,10 +12,17 @@ DEFINE_LOG_CATEGORY_STATIC(LogSimUdpBridge, Log, All);
 
 namespace SimUdpProtocol
 {
-constexpr int32 PosePacketSize = 48;
-constexpr int32 AckPacketSize = 12;
-constexpr uint8 Version = 1;
-constexpr uint8 PoseMagic[4] = {'S', 'U', 'D', 'P'};
+constexpr int32 CommandPacketSize = 56;
+constexpr int32 AckPacketSize = 20;
+constexpr int32 MaxPacketsPerTick = 1024;
+constexpr uint8 Version = 2;
+constexpr uint8 StartRunFlag = 0x01;
+constexpr uint8 KnownCommandFlags = StartRunFlag;
+constexpr uint8 AckApplied = 0;
+constexpr uint8 AckInvalidPacket = 1;
+constexpr uint8 AckRejected = 2;
+constexpr uint8 AckApplyFailed = 3;
+constexpr uint8 CommandMagic[4] = {'S', 'U', 'D', 'P'};
 constexpr uint8 AckMagic[4] = {'S', 'A', 'C', 'K'};
 
 uint16 ReadU16BE(const uint8* Data)
@@ -56,10 +64,17 @@ void WriteU32BE(uint8* Data, uint32 Value)
     Data[2] = static_cast<uint8>(Value >> 8);
     Data[3] = static_cast<uint8>(Value);
 }
+
+void WriteU64BE(uint8* Data, uint64 Value)
+{
+    WriteU32BE(Data, static_cast<uint32>(Value >> 32));
+    WriteU32BE(Data + 4, static_cast<uint32>(Value));
+}
 } // namespace SimUdpProtocol
 
 ASimUdpControlledActor::ASimUdpControlledActor()
 {
+    SetRootComponent(CreateDefaultSubobject<USceneComponent>(TEXT("Root")));
     PrimaryActorTick.bCanEverTick = true;
     PrimaryActorTick.TickGroup = TG_PrePhysics;
 }
@@ -68,8 +83,23 @@ void ASimUdpControlledActor::BeginPlay()
 {
     Super::BeginPlay();
 
-    AActor* Target = ControlledActor ? ControlledActor.Get() : this;
-    InitialControlledTransform = Target->GetActorTransform();
+    if (IsValid(ControlledActor))
+    {
+        InitialControlledTransform = ControlledActor->GetActorTransform();
+        const USceneComponent* Root = ControlledActor->GetRootComponent();
+        if (Root && Root->Mobility != EComponentMobility::Movable)
+        {
+            UE_LOG(LogSimUdpBridge, Warning,
+                TEXT("Controlled actor '%s' is not Movable"),
+                *ControlledActor->GetName());
+        }
+    }
+    else
+    {
+        UE_LOG(LogSimUdpBridge, Warning,
+            TEXT("ControlledActor is unset; commands will be rejected"));
+    }
+
     OpenSocket();
 }
 
@@ -88,6 +118,12 @@ void ASimUdpControlledActor::Tick(float DeltaSeconds)
 
 bool ASimUdpControlledActor::OpenSocket()
 {
+    if (ListenPort < 1 || ListenPort > 65535)
+    {
+        UE_LOG(LogSimUdpBridge, Error, TEXT("ListenPort %d is invalid"), ListenPort);
+        return false;
+    }
+
     FIPv4Address Address;
     if (!FIPv4Address::Parse(BindAddress, Address))
     {
@@ -98,18 +134,19 @@ bool ASimUdpControlledActor::OpenSocket()
     const FIPv4Endpoint Endpoint(Address, static_cast<uint16>(ListenPort));
     ListenSocket = FUdpSocketBuilder(TEXT("SimUdpBridgeSocket"))
         .AsNonBlocking()
-        .AsReusable()
         .BoundToEndpoint(Endpoint)
         .WithReceiveBufferSize(2 * 1024 * 1024)
         .WithSendBufferSize(256 * 1024);
 
     if (!ListenSocket)
     {
-        UE_LOG(LogSimUdpBridge, Error, TEXT("Could not bind UDP socket to %s:%d"), *BindAddress, ListenPort);
+        UE_LOG(LogSimUdpBridge, Error,
+            TEXT("Could not bind UDP socket to %s:%d"), *BindAddress, ListenPort);
         return false;
     }
 
-    UE_LOG(LogSimUdpBridge, Display, TEXT("Listening for SIL pose packets on %s:%d"), *BindAddress, ListenPort);
+    UE_LOG(LogSimUdpBridge, Display,
+        TEXT("Listening for SIL pose packets on %s:%d"), *BindAddress, ListenPort);
     return true;
 }
 
@@ -133,10 +170,14 @@ void ASimUdpControlledActor::ReceivePackets()
     }
 
     uint32 PendingDataSize = 0;
-    while (ListenSocket->HasPendingData(PendingDataSize))
+    int32 ProcessedPacketCount = 0;
+    while (ProcessedPacketCount < SimUdpProtocol::MaxPacketsPerTick &&
+           ListenSocket->HasPendingData(PendingDataSize))
     {
+        ++ProcessedPacketCount;
         TArray<uint8> Data;
-        Data.SetNumUninitialized(FMath::Min(PendingDataSize, 65507u));
+        Data.SetNumUninitialized(
+            static_cast<int32>(FMath::Min(PendingDataSize, 65507u)));
 
         TSharedRef<FInternetAddr> Sender =
             ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM)->CreateInternetAddr();
@@ -151,18 +192,51 @@ void ASimUdpControlledActor::ReceivePackets()
         if (!ParsePosePacket(Data.GetData(), BytesRead, Candidate))
         {
             ++InvalidPacketCount;
-            SendAck(*Sender, 0, 1);
+            SendAck(*Sender, 0, 0, SimUdpProtocol::AckInvalidPacket);
             continue;
         }
 
         ++ValidPacketCount;
-        if (IsNewerSequence(Candidate.Sequence) &&
-            (!PendingPose.IsSet() ||
-             static_cast<int32>(Candidate.Sequence - PendingPose->Sequence) > 0))
+        Candidate.Sender = Sender;
+
+        if (!bHasActiveRun || Candidate.RunId != ActiveRunId)
         {
-            Candidate.Sender = Sender;
-            PendingPose = MoveTemp(Candidate);
+            if (bHasActiveRun && !Candidate.bStartOfRun)
+            {
+                ++RejectedPacketCount;
+                SendAck(*Sender, Candidate.RunId, Candidate.Sequence,
+                    SimUdpProtocol::AckRejected);
+                continue;
+            }
+
+            ActiveRunId = Candidate.RunId;
+            bHasActiveRun = true;
+            bHasAppliedSequence = false;
+            PendingPose.Reset();
+            UE_LOG(LogSimUdpBridge, Display,
+                TEXT("Started SIL run 0x%016llX"),
+                static_cast<unsigned long long>(ActiveRunId));
         }
+
+        if (bHasAppliedSequence && Candidate.Sequence == LastAppliedSequenceRaw)
+        {
+            // Idempotent retry: the original ACK may have been lost.
+            SendAck(*Sender, Candidate.RunId, Candidate.Sequence,
+                SimUdpProtocol::AckApplied);
+            continue;
+        }
+
+        if (!IsNewerThanApplied(Candidate.Sequence) ||
+            (PendingPose.IsSet() &&
+             static_cast<int32>(Candidate.Sequence - PendingPose->Sequence) <= 0))
+        {
+            ++RejectedPacketCount;
+            SendAck(*Sender, Candidate.RunId, Candidate.Sequence,
+                SimUdpProtocol::AckRejected);
+            continue;
+        }
+
+        PendingPose = MoveTemp(Candidate);
     }
 }
 
@@ -173,28 +247,35 @@ bool ASimUdpControlledActor::ParsePosePacket(
 {
     using namespace SimUdpProtocol;
 
-    if (NumBytes != PosePacketSize || FMemory::Memcmp(Data, PoseMagic, 4) != 0)
-    {
-        return false;
-    }
-    if (Data[4] != Version || Data[5] != 0 || ReadU16BE(Data + 6) != 0)
+    if (NumBytes != CommandPacketSize ||
+        FMemory::Memcmp(Data, CommandMagic, 4) != 0)
     {
         return false;
     }
 
-    OutPose.Sequence = ReadU32BE(Data + 8);
-    OutPose.SimulationTimeNs = ReadU64BE(Data + 12);
+    const uint8 Flags = Data[5];
+    if (Data[4] != Version || (Flags & ~KnownCommandFlags) != 0 ||
+        ReadU16BE(Data + 6) != 0)
+    {
+        return false;
+    }
+
+    OutPose.bStartOfRun = (Flags & StartRunFlag) != 0;
+    OutPose.RunId = ReadU64BE(Data + 8);
+    OutPose.Sequence = ReadU32BE(Data + 16);
+    OutPose.SimulationTimeNs = ReadU64BE(Data + 20);
     OutPose.PositionMetres = FVector(
-        ReadFloatBE(Data + 20),
-        ReadFloatBE(Data + 24),
-        ReadFloatBE(Data + 28));
-    OutPose.Rotation = FQuat(
+        ReadFloatBE(Data + 28),
         ReadFloatBE(Data + 32),
-        ReadFloatBE(Data + 36),
+        ReadFloatBE(Data + 36));
+    OutPose.Rotation = FQuat(
         ReadFloatBE(Data + 40),
-        ReadFloatBE(Data + 44));
+        ReadFloatBE(Data + 44),
+        ReadFloatBE(Data + 48),
+        ReadFloatBE(Data + 52));
 
-    if (OutPose.PositionMetres.ContainsNaN() || OutPose.Rotation.ContainsNaN() ||
+    if (OutPose.RunId == 0 || OutPose.PositionMetres.ContainsNaN() ||
+        OutPose.Rotation.ContainsNaN() ||
         OutPose.Rotation.SizeSquared() < UE_SMALL_NUMBER)
     {
         return false;
@@ -214,8 +295,17 @@ void ASimUdpControlledActor::ApplyPendingPose()
     const FPendingPose Pose = MoveTemp(PendingPose.GetValue());
     PendingPose.Reset();
 
-    AActor* Target = ControlledActor ? ControlledActor.Get() : this;
-    FVector TargetLocation = Pose.PositionMetres * 100.0; // metres to Unreal centimetres
+    if (!IsValid(ControlledActor))
+    {
+        if (Pose.Sender.IsValid())
+        {
+            SendAck(*Pose.Sender, Pose.RunId, Pose.Sequence,
+                SimUdpProtocol::AckApplyFailed);
+        }
+        return;
+    }
+
+    FVector TargetLocation = Pose.PositionMetres * 100.0; // metres to centimetres
     FQuat TargetRotation = Pose.Rotation;
 
     if (bPositionRelativeToStart)
@@ -228,25 +318,38 @@ void ASimUdpControlledActor::ApplyPendingPose()
         TargetRotation.Normalize();
     }
 
-    Target->SetActorLocationAndRotation(
+    const bool bApplied = ControlledActor->SetActorLocationAndRotation(
         TargetLocation,
         TargetRotation,
         false,
         nullptr,
         ETeleportType::TeleportPhysics);
 
+    if (!bApplied)
+    {
+        if (Pose.Sender.IsValid())
+        {
+            SendAck(*Pose.Sender, Pose.RunId, Pose.Sequence,
+                SimUdpProtocol::AckApplyFailed);
+        }
+        return;
+    }
+
+    LastAppliedRunId = Pose.RunId;
     LastAppliedSequenceRaw = Pose.Sequence;
     LastAppliedSequence = static_cast<int64>(Pose.Sequence);
     bHasAppliedSequence = true;
 
     if (Pose.Sender.IsValid())
     {
-        SendAck(*Pose.Sender, Pose.Sequence, 0);
+        SendAck(*Pose.Sender, Pose.RunId, Pose.Sequence,
+            SimUdpProtocol::AckApplied);
     }
 }
 
 void ASimUdpControlledActor::SendAck(
     const FInternetAddr& Destination,
+    uint64 RunId,
     uint32 Sequence,
     uint8 Status)
 {
@@ -262,13 +365,19 @@ void ASimUdpControlledActor::SendAck(
     Ack[4] = Version;
     Ack[5] = Status;
     WriteU16BE(Ack + 6, 0);
-    WriteU32BE(Ack + 8, Sequence);
+    WriteU64BE(Ack + 8, RunId);
+    WriteU32BE(Ack + 16, Sequence);
 
     int32 BytesSent = 0;
-    ListenSocket->SendTo(Ack, AckPacketSize, BytesSent, Destination);
+    if (!ListenSocket->SendTo(Ack, AckPacketSize, BytesSent, Destination) ||
+        BytesSent != AckPacketSize)
+    {
+        UE_LOG(LogSimUdpBridge, VeryVerbose, TEXT("Could not send complete ACK"));
+    }
 }
 
-bool ASimUdpControlledActor::IsNewerSequence(uint32 Candidate) const
+bool ASimUdpControlledActor::IsNewerThanApplied(uint32 Candidate) const
 {
-    return !bHasAppliedSequence || static_cast<int32>(Candidate - LastAppliedSequenceRaw) > 0;
+    return !bHasAppliedSequence ||
+        static_cast<int32>(Candidate - LastAppliedSequenceRaw) > 0;
 }

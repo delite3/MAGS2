@@ -1,45 +1,83 @@
-"""Binary protocol shared by the Python SIL client and Unreal plugin."""
+"""Wire format shared by the Python SIL client and Unreal UDP bridge."""
 
 from __future__ import annotations
 
 import dataclasses
+import math
 import struct
 
 
-PROTOCOL_VERSION = 1
-POSE_MAGIC = b"SUDP"
+PROTOCOL_VERSION = 2
+COMMAND_MAGIC = b"SUDP"
 ACK_MAGIC = b"SACK"
+START_RUN_FLAG = 0x01
+
+ACK_APPLIED = 0
+ACK_INVALID_PACKET = 1
+ACK_REJECTED = 2
+ACK_APPLY_FAILED = 3
+KNOWN_ACK_STATUSES = {
+    ACK_APPLIED,
+    ACK_INVALID_PACKET,
+    ACK_REJECTED,
+    ACK_APPLY_FAILED,
+}
 
 # Network byte order. Quaternion component order is X, Y, Z, W.
-POSE_STRUCT = struct.Struct("!4sBBHIQ7f")
-ACK_STRUCT = struct.Struct("!4sBBHI")
+# Command: magic, version, flags, reserved, run, sequence, sim time, pose.
+COMMAND_STRUCT = struct.Struct("!4sBBHQIQ7f")
+# ACK: magic, version, status, reserved, run, applied/rejected sequence.
+ACK_STRUCT = struct.Struct("!4sBBHQI")
 
 
 @dataclasses.dataclass(frozen=True)
 class PoseCommand:
+    run_id: int
     sequence: int
     simulation_time_ns: int
     position_m: tuple[float, float, float]
     quaternion_xyzw: tuple[float, float, float, float]
+    start_of_run: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
 class Ack:
+    run_id: int
     sequence: int
     status: int
 
 
+def _require_unsigned(name: str, value: int, bits: int) -> None:
+    if not 0 <= value < (1 << bits):
+        raise ValueError(f"{name} must fit in uint{bits}")
+
+
 def pack_pose(command: PoseCommand) -> bytes:
-    """Serialize one absolute/relative pose command for the Unreal receiver."""
-    return POSE_STRUCT.pack(
-        POSE_MAGIC,
+    """Validate and serialize one pose command."""
+    _require_unsigned("run_id", command.run_id, 64)
+    if command.run_id == 0:
+        raise ValueError("run_id zero is reserved")
+    _require_unsigned("sequence", command.sequence, 32)
+    _require_unsigned("simulation_time_ns", command.simulation_time_ns, 64)
+
+    values = (*command.position_m, *command.quaternion_xyzw)
+    if len(command.position_m) != 3 or len(command.quaternion_xyzw) != 4:
+        raise ValueError("pose requires three position and four quaternion values")
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("pose values must be finite")
+    if sum(value * value for value in command.quaternion_xyzw) < 1.0e-12:
+        raise ValueError("quaternion must have non-zero length")
+
+    flags = START_RUN_FLAG if command.start_of_run else 0
+    return COMMAND_STRUCT.pack(
+        COMMAND_MAGIC,
         PROTOCOL_VERSION,
+        flags,
         0,
-        0,
+        command.run_id,
         command.sequence,
         command.simulation_time_ns,
-        *command.position_m,
-        *command.quaternion_xyzw,
+        *values,
     )
 
 
@@ -48,12 +86,14 @@ def unpack_ack(data: bytes) -> Ack:
     if len(data) != ACK_STRUCT.size:
         raise ValueError(f"ACK must be {ACK_STRUCT.size} bytes, received {len(data)}")
 
-    magic, version, status, reserved, sequence = ACK_STRUCT.unpack(data)
+    magic, version, status, reserved, run_id, sequence = ACK_STRUCT.unpack(data)
     if magic != ACK_MAGIC:
-        raise ValueError(f"Unexpected ACK magic {magic!r}")
+        raise ValueError(f"unexpected ACK magic {magic!r}")
     if version != PROTOCOL_VERSION:
-        raise ValueError(f"Unsupported ACK protocol version {version}")
+        raise ValueError(f"unsupported ACK protocol version {version}")
     if reserved != 0:
         raise ValueError("ACK reserved field must be zero")
+    if status not in KNOWN_ACK_STATUSES:
+        raise ValueError(f"unknown ACK status {status}")
 
-    return Ack(sequence=sequence, status=status)
+    return Ack(run_id=run_id, sequence=sequence, status=status)

@@ -14,30 +14,34 @@ class SIMUDPBRIDGE_API ASimUdpControlledActor : public AActor
 
 public:
     ASimUdpControlledActor();
-
     virtual void Tick(float DeltaSeconds) override;
 
-    /** Actor to move. If unset, this UDP bridge actor moves itself. */
+    /** Existing level actor that receives the commanded transform. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP")
-    TObjectPtr<AActor> ControlledActor;
+    TObjectPtr<AActor> ControlledActor = nullptr;
 
-    /** Local IPv4 address. Leave as 0.0.0.0 to listen on every interface. */
+    /** Local IPv4 address. 0.0.0.0 listens on every interface. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Network")
     FString BindAddress = TEXT("0.0.0.0");
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Network", meta = (ClampMin = "1", ClampMax = "65535"))
     int32 ListenPort = 5005;
 
-    /** Interpret packet positions as metre offsets from the actor's BeginPlay position. */
+    /** Packet positions are metre offsets from the target's BeginPlay position. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Transform")
     bool bPositionRelativeToStart = true;
 
-    /** Interpret packet rotations as offsets from the actor's BeginPlay rotation. */
+    /** Packet rotations are offsets from the target's BeginPlay rotation. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Transform")
     bool bRotationRelativeToStart = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Network")
     bool bSendAcknowledgements = true;
+
+    // uint64 is valid C++/reflection data but is not a Blueprint-supported
+    // property type. VisibleAnywhere keeps it readable in the Details panel.
+    UPROPERTY(VisibleAnywhere, Category = "SIL UDP|Diagnostics")
+    uint64 LastAppliedRunId = 0;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SIL UDP|Diagnostics")
     int64 LastAppliedSequence = -1;
@@ -48,6 +52,9 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SIL UDP|Diagnostics")
     int64 InvalidPacketCount = 0;
 
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SIL UDP|Diagnostics")
+    int64 RejectedPacketCount = 0;
+
 protected:
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -55,10 +62,12 @@ protected:
 private:
     struct FPendingPose
     {
+        uint64 RunId = 0;
         uint32 Sequence = 0;
         uint64 SimulationTimeNs = 0;
         FVector PositionMetres = FVector::ZeroVector;
         FQuat Rotation = FQuat::Identity;
+        bool bStartOfRun = false;
         TSharedPtr<FInternetAddr> Sender;
     };
 
@@ -67,12 +76,18 @@ private:
     void ReceivePackets();
     bool ParsePosePacket(const uint8* Data, int32 NumBytes, FPendingPose& OutPose) const;
     void ApplyPendingPose();
-    void SendAck(const FInternetAddr& Destination, uint32 Sequence, uint8 Status);
-    bool IsNewerSequence(uint32 Candidate) const;
+    void SendAck(
+        const FInternetAddr& Destination,
+        uint64 RunId,
+        uint32 Sequence,
+        uint8 Status);
+    bool IsNewerThanApplied(uint32 Candidate) const;
 
     FSocket* ListenSocket = nullptr;
     FTransform InitialControlledTransform = FTransform::Identity;
     TOptional<FPendingPose> PendingPose;
+    bool bHasActiveRun = false;
+    uint64 ActiveRunId = 0;
     bool bHasAppliedSequence = false;
     uint32 LastAppliedSequenceRaw = 0;
 };
