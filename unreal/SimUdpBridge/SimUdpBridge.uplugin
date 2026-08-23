@@ -1,9 +1,9 @@
 {
   "FileVersion": 3,
-  "Version": 2,
-  "VersionName": "0.2.0-poc",
+  "Version": 5,
+  "VersionName": "0.3.2-camera-view-state-fix",
   "FriendlyName": "SIL UDP Bridge",
-  "Description": "Receives versioned pose commands over UDP and applies them to an Unreal actor.",
+  "Description": "Receives SIL poses over UDP and streams a tagged SceneCapture camera over TCP.",
   "Category": "Simulation",
   "CreatedBy": "mags",
   "EnabledByDefault": true,

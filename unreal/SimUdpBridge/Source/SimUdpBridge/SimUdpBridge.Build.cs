@@ -19,7 +19,9 @@ public class SimUdpBridge : ModuleRules
             new string[]
             {
                 "Networking",
-                "Sockets"
+                "Sockets",
+                "ImageCore",
+                "ImageWrapper"
             }
         );
     }

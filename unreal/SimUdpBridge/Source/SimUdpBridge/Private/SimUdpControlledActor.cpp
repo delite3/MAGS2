@@ -79,6 +79,22 @@ ASimUdpControlledActor::ASimUdpControlledActor()
     PrimaryActorTick.TickGroup = TG_PrePhysics;
 }
 
+bool ASimUdpControlledActor::GetLastAppliedPoseMetadata(
+    uint64& OutRunId,
+    uint32& OutSequence,
+    uint64& OutSimulationTimeNs) const
+{
+    if (!bHasAppliedSequence || LastAppliedRunId == 0)
+    {
+        return false;
+    }
+
+    OutRunId = LastAppliedRunId;
+    OutSequence = LastAppliedSequenceRaw;
+    OutSimulationTimeNs = LastAppliedSimulationTimeNsRaw;
+    return true;
+}
+
 void ASimUdpControlledActor::BeginPlay()
 {
     Super::BeginPlay();
@@ -337,6 +353,7 @@ void ASimUdpControlledActor::ApplyPendingPose()
 
     LastAppliedRunId = Pose.RunId;
     LastAppliedSequenceRaw = Pose.Sequence;
+    LastAppliedSimulationTimeNsRaw = Pose.SimulationTimeNs;
     LastAppliedSequence = static_cast<int64>(Pose.Sequence);
     bHasAppliedSequence = true;
 

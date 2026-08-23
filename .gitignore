@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+received_camera_frames/
 
 # Unreal generates these when the source plugin is compiled.
 unreal/**/Binaries/

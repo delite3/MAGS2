@@ -16,6 +16,17 @@ public:
     ASimUdpControlledActor();
     virtual void Tick(float DeltaSeconds) override;
 
+    /**
+     * Return metadata for the most recently applied pose. This is deliberately
+     * a C++-only method because Unreal's Blueprint reflection does not support
+     * uint64 properties reliably. Camera sensors use it to tag an image with
+     * the exact SIL command that produced the rendered vehicle state.
+     */
+    bool GetLastAppliedPoseMetadata(
+        uint64& OutRunId,
+        uint32& OutSequence,
+        uint64& OutSimulationTimeNs) const;
+
     /** Existing level actor that receives the commanded transform. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP")
     TObjectPtr<AActor> ControlledActor = nullptr;
@@ -90,4 +101,5 @@ private:
     uint64 ActiveRunId = 0;
     bool bHasAppliedSequence = false;
     uint32 LastAppliedSequenceRaw = 0;
+    uint64 LastAppliedSimulationTimeNsRaw = 0;
 };
