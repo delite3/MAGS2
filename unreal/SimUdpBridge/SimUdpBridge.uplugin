@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
   "Version": 5,
-  "VersionName": "0.3.2-camera-view-state-fix",
+  "VersionName": "0.3.2",
   "FriendlyName": "SIL UDP Bridge",
   "Description": "Receives SIL poses over UDP and streams a tagged SceneCapture camera over TCP.",
   "Category": "Simulation",

@@ -1,0 +1,36 @@
+name: Python tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Check Python syntax
+        run: >-
+          python -m py_compile
+          sim_camera_protocol.py
+          sim_udp_protocol.py
+          ue_camera_receiver.py
+          ue_udp_sender.py
+
+      - name: Run protocol tests
+        run: python -B -m unittest discover -s tests -v

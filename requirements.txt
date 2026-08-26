@@ -1,0 +1,4 @@
+# Optional dependencies used only by ue_camera_receiver.py --display.
+# Receiving and saving JPEGs works with the Python standard library alone.
+numpy>=1.26,<3
+opencv-python>=4.9,<6
