@@ -9,6 +9,7 @@ import struct
 
 PROTOCOL_VERSION = 2
 COMMAND_MAGIC = b"SUDP"
+GEOREFERENCE_MAGIC = b"SGRF"
 ACK_MAGIC = b"SACK"
 START_RUN_FLAG = 0x01
 
@@ -26,6 +27,9 @@ KNOWN_ACK_STATUSES = {
 # Network byte order. Quaternion component order is X, Y, Z, W.
 # Command: magic, version, flags, reserved, run, sequence, sim time, pose.
 COMMAND_STRUCT = struct.Struct("!4sBBHQIQ7f")
+# Georeference: magic, version, flags, reserved, run, latitude, longitude,
+# ellipsoid height. The user-facing order is latitude, longitude, height.
+GEOREFERENCE_STRUCT = struct.Struct("!4sBBHQ3d")
 # ACK: magic, version, status, reserved, run, applied/rejected sequence.
 ACK_STRUCT = struct.Struct("!4sBBHQI")
 
@@ -38,6 +42,14 @@ class PoseCommand:
     position_m: tuple[float, float, float]
     quaternion_xyzw: tuple[float, float, float, float]
     start_of_run: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class GeoreferenceCommand:
+    run_id: int
+    latitude_deg: float
+    longitude_deg: float
+    ellipsoid_height_m: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,6 +89,33 @@ def pack_pose(command: PoseCommand) -> bytes:
         command.run_id,
         command.sequence,
         command.simulation_time_ns,
+        *values,
+    )
+
+
+def pack_georeference(command: GeoreferenceCommand) -> bytes:
+    """Validate and serialize one Cesium startup origin command."""
+    _require_unsigned("run_id", command.run_id, 64)
+    if command.run_id == 0:
+        raise ValueError("run_id zero is reserved")
+    values = (
+        command.latitude_deg,
+        command.longitude_deg,
+        command.ellipsoid_height_m,
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("georeference values must be finite")
+    if not -90.0 <= command.latitude_deg <= 90.0:
+        raise ValueError("latitude must be between -90 and 90 degrees")
+    if not -180.0 <= command.longitude_deg <= 180.0:
+        raise ValueError("longitude must be between -180 and 180 degrees")
+
+    return GEOREFERENCE_STRUCT.pack(
+        GEOREFERENCE_MAGIC,
+        PROTOCOL_VERSION,
+        0,
+        0,
+        command.run_id,
         *values,
     )
 

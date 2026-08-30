@@ -29,7 +29,12 @@ C:\Users\hda\Documents\Unreal Projects\AM
 - The camera sends valid 320x240 JPEG frames over TCP and tags them with the
   most recently applied run, pose sequence, and simulation timestamp.
 - The BGRA8/sRGB and persistent-view-state fixes produce non-white scene images.
-- All 20 Python protocol tests pass.
+- The Python protocol test suite passes.
+
+The georeferenced startup and independent object-height controls were built and
+confirmed in PIE on 2026-08-29. User-authored pose trajectories are generated
+entirely by Python and use the existing quaternion-capable UDP packet, so they
+do not require another Unreal plugin rebuild.
 
 Computer vision, vehicle dynamics, asynchronous GPU readback, hardware video
 encoding, and deterministic lockstep stepping remain later milestones.
@@ -39,13 +44,15 @@ encoding, and deterministic lockstep stepping remain later milestones.
 ```text
 .
 ├── sim_udp_protocol.py              # UDP command/ACK wire format
+├── sim_trajectory.py                # CSV pose loading and interpolation
 ├── sim_camera_protocol.py           # TCP camera frame wire format
-├── ue_udp_sender.py                 # Path generator and ACK metrics
+├── ue_udp_sender.py                 # Pose generator and ACK metrics
 ├── ue_camera_receiver.py            # JPEG receiver, saver, and display
+├── examples/                        # Ready-to-run pose trajectory
 ├── tests/                            # Standard-library protocol tests
 ├── unreal/SimUdpBridge/              # UE project plugin source
 ├── docs/                             # Setup, architecture, protocol, recovery
-└── requirements-display.txt          # Optional OpenCV display dependencies
+└── requirements.txt                  # Optional OpenCV display dependencies
 ```
 
 The repository tracks integration code, not the complete Windows `AM` project.
@@ -117,16 +124,67 @@ In a second terminal, from the same repository root:
 python3 ue_udp_sender.py \
   --host "$UE_HOST" \
   --path circle \
-  --altitude 2 \
+  --latitude 48.8566 \
+  --longitude 2.3522 \
+  --altitude 35.5 \
+  --object-height 2 \
+  --roll 0 \
+  --pitch 0 \
+  --yaw-offset 0 \
   --radius 2 \
   --period 8 \
   --rate 30 \
   --duration 10
 ```
 
+`--latitude`, `--longitude`, and `--altitude` set the Cesium WGS84 origin;
+`--altitude` is height above the WGS84 ellipsoid. `--object-height` independently
+sets every profile's local Unreal +Z position above that origin and defaults to
+zero. It is a local tangent-frame offset, not terrain AGL, mean-sea-level
+height, or another geodetic altitude.
 `--speed` controls only the line path; circle speed is set by `--period`.
 
-To display frames, install `requirements-display.txt` in your chosen Python
+For built-in paths, `--roll` and `--pitch` set constant Unreal rotation angles.
+`--yaw-offset` is added to the automatically generated heading: line faces its
+direction of travel, circle faces tangent to the path, and hover starts at zero
+yaw. These angles use the same degree convention as Unreal's Transform fields.
+
+### 6. Run a user-authored pose trajectory
+
+The included [pose trajectory](examples/pose_trajectory.csv) demonstrates the
+CSV format:
+
+```csv
+time_s,x_m,y_m,z_m,roll_deg,pitch_deg,yaw_deg
+0,0,0,2,0,0,0
+2,2,0,2,0,0,0
+4,2,2,3,0,-10,90
+```
+
+Run the complete example with:
+
+```bash
+python3 ue_udp_sender.py \
+  --host "$UE_HOST" \
+  --trajectory examples/pose_trajectory.csv \
+  --latitude 48.8566 \
+  --longitude 2.3522 \
+  --altitude 35.5 \
+  --rate 30
+```
+
+Every row defines the cone's complete local pose at `time_s`. Position is
+linearly interpolated in metres and orientation is shortest-path quaternion
+SLERP between rows. The first timestamp must be zero and subsequent timestamps
+must strictly increase. With no `--duration`, the run ends at the last row; a
+shorter duration truncates it, while a longer one holds the final pose.
+
+`--rate` is the command sampling rate and is independent of the CSV row spacing.
+Because the file contains complete Z and orientation values, `--trajectory`
+cannot be combined with `--object-height`, `--roll`, `--pitch`, or
+`--yaw-offset`.
+
+To display frames, install `requirements.txt` in your chosen Python
 environment and add `--display`. Press `q` in the OpenCV window to stop.
 
 ## Detailed documentation

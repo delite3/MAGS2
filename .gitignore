@@ -15,3 +15,4 @@ received_camera_frames/
 # Unreal generates these when the source plugin is compiled.
 unreal/**/Binaries/
 unreal/**/Intermediate/
+examples/

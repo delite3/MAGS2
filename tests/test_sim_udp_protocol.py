@@ -8,9 +8,13 @@ from sim_udp_protocol import (
     ACK_STRUCT,
     COMMAND_MAGIC,
     COMMAND_STRUCT,
+    GEOREFERENCE_MAGIC,
+    GEOREFERENCE_STRUCT,
     PROTOCOL_VERSION,
     START_RUN_FLAG,
+    GeoreferenceCommand,
     PoseCommand,
+    pack_georeference,
     pack_pose,
     unpack_ack,
 )
@@ -63,6 +67,21 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(COMMAND_STRUCT.unpack(first)[5], 1)
         self.assertEqual(COMMAND_STRUCT.unpack(second)[5], 1)
 
+    def test_georeference_packet_layout(self):
+        packet = pack_georeference(
+            GeoreferenceCommand(
+                run_id=7,
+                latitude_deg=48.8566,
+                longitude_deg=2.3522,
+                ellipsoid_height_m=35.5,
+            )
+        )
+        self.assertEqual(len(packet), GEOREFERENCE_STRUCT.size)
+        self.assertEqual(
+            GEOREFERENCE_STRUCT.unpack(packet),
+            (GEOREFERENCE_MAGIC, PROTOCOL_VERSION, 0, 0, 7, 48.8566, 2.3522, 35.5),
+        )
+
     def test_ack_layout_and_validation(self):
         packet = ACK_STRUCT.pack(
             ACK_MAGIC,
@@ -82,6 +101,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(position, (0.0, 0.0, 3.0))
         self.assertAlmostEqual(quaternion[2], math.sqrt(0.5))
         self.assertAlmostEqual(quaternion[3], math.sqrt(0.5))
+
+    def test_object_height_is_independent_of_path_profile(self):
+        for path in ("line", "circle", "hover"):
+            with self.subTest(path=path):
+                position, _ = path_pose(path, 1.25, 2.0, 4.0, 8.0, 12.5)
+                self.assertEqual(position[2], 12.5)
 
     def test_rejects_bad_ack_magic(self):
         packet = struct.pack(
@@ -125,6 +150,16 @@ class ProtocolTests(unittest.TestCase):
                     quaternion_xyzw=(0.0, 0.0, 0.0, 1.0),
                 )
             )
+
+    def test_rejects_invalid_georeference(self):
+        with self.assertRaises(ValueError):
+            pack_georeference(GeoreferenceCommand(0, 0.0, 0.0, 0.0))
+        with self.assertRaises(ValueError):
+            pack_georeference(GeoreferenceCommand(1, 91.0, 0.0, 0.0))
+        with self.assertRaises(ValueError):
+            pack_georeference(GeoreferenceCommand(1, 0.0, 181.0, 0.0))
+        with self.assertRaises(ValueError):
+            pack_georeference(GeoreferenceCommand(1, 0.0, 0.0, float("nan")))
 
 
 if __name__ == "__main__":

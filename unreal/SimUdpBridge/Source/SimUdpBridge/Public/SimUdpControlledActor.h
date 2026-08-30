@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CesiumGeoreference.h"
 #include "GameFramework/Actor.h"
 #include "SimUdpControlledActor.generated.h"
 
@@ -31,6 +32,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP")
     TObjectPtr<AActor> ControlledActor = nullptr;
 
+    /** Cesium actor whose origin is set by each sender run's startup packet. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Georeference")
+    TObjectPtr<ACesiumGeoreference> CesiumGeoreference = nullptr;
+
     /** Local IPv4 address. 0.0.0.0 listens on every interface. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Network")
     FString BindAddress = TEXT("0.0.0.0");
@@ -38,13 +43,13 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Network", meta = (ClampMin = "1", ClampMax = "65535"))
     int32 ListenPort = 5005;
 
-    /** Packet positions are metre offsets from the target's BeginPlay position. */
+    /** Add the target's BeginPlay location to each commanded metre position. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Transform")
-    bool bPositionRelativeToStart = true;
+    bool bPositionRelativeToStart = false;
 
-    /** Packet rotations are offsets from the target's BeginPlay rotation. */
+    /** Compose each commanded rotation with the target's BeginPlay rotation. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Transform")
-    bool bRotationRelativeToStart = true;
+    bool bRotationRelativeToStart = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SIL UDP|Network")
     bool bSendAcknowledgements = true;
@@ -82,10 +87,24 @@ private:
         TSharedPtr<FInternetAddr> Sender;
     };
 
+    struct FPendingGeoreference
+    {
+        uint64 RunId = 0;
+        double LatitudeDegrees = 0.0;
+        double LongitudeDegrees = 0.0;
+        double EllipsoidHeightMetres = 0.0;
+        TSharedPtr<FInternetAddr> Sender;
+    };
+
     bool OpenSocket();
     void CloseSocket();
     void ReceivePackets();
+    bool ParseGeoreferencePacket(
+        const uint8* Data,
+        int32 NumBytes,
+        FPendingGeoreference& OutGeoreference) const;
     bool ParsePosePacket(const uint8* Data, int32 NumBytes, FPendingPose& OutPose) const;
+    bool ApplyGeoreference(const FPendingGeoreference& Georeference);
     void ApplyPendingPose();
     void SendAck(
         const FInternetAddr& Destination,
@@ -98,6 +117,7 @@ private:
     FTransform InitialControlledTransform = FTransform::Identity;
     TOptional<FPendingPose> PendingPose;
     bool bHasActiveRun = false;
+    bool bHasGeoreference = false;
     uint64 ActiveRunId = 0;
     bool bHasAppliedSequence = false;
     uint32 LastAppliedSequenceRaw = 0;

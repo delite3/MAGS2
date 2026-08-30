@@ -1,7 +1,9 @@
 #include "SimUdpControlledActor.h"
 
+#include "CesiumGeoreference.h"
 #include "Common/UdpSocketBuilder.h"
 #include "Components/SceneComponent.h"
+#include "EngineUtils.h"
 #include "IPAddress.h"
 #include "Interfaces/IPv4/IPv4Address.h"
 #include "Interfaces/IPv4/IPv4Endpoint.h"
@@ -13,6 +15,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogSimUdpBridge, Log, All);
 namespace SimUdpProtocol
 {
 constexpr int32 CommandPacketSize = 56;
+constexpr int32 GeoreferencePacketSize = 40;
 constexpr int32 AckPacketSize = 20;
 constexpr int32 MaxPacketsPerTick = 1024;
 constexpr uint8 Version = 2;
@@ -23,6 +26,7 @@ constexpr uint8 AckInvalidPacket = 1;
 constexpr uint8 AckRejected = 2;
 constexpr uint8 AckApplyFailed = 3;
 constexpr uint8 CommandMagic[4] = {'S', 'U', 'D', 'P'};
+constexpr uint8 GeoreferenceMagic[4] = {'S', 'G', 'R', 'F'};
 constexpr uint8 AckMagic[4] = {'S', 'A', 'C', 'K'};
 
 uint16 ReadU16BE(const uint8* Data)
@@ -47,6 +51,14 @@ float ReadFloatBE(const uint8* Data)
 {
     const uint32 Bits = ReadU32BE(Data);
     float Value = 0.0f;
+    FMemory::Memcpy(&Value, &Bits, sizeof(Value));
+    return Value;
+}
+
+double ReadDoubleBE(const uint8* Data)
+{
+    const uint64 Bits = ReadU64BE(Data);
+    double Value = 0.0;
     FMemory::Memcpy(&Value, &Bits, sizeof(Value));
     return Value;
 }
@@ -98,6 +110,24 @@ bool ASimUdpControlledActor::GetLastAppliedPoseMetadata(
 void ASimUdpControlledActor::BeginPlay()
 {
     Super::BeginPlay();
+
+    if (!IsValid(CesiumGeoreference))
+    {
+        for (TActorIterator<ACesiumGeoreference> It(GetWorld()); It; ++It)
+        {
+            CesiumGeoreference = *It;
+            UE_LOG(LogSimUdpBridge, Warning,
+                TEXT("CesiumGeoreference was unset; using discovered actor '%s'"),
+                *CesiumGeoreference->GetName());
+            break;
+        }
+    }
+
+    if (!IsValid(CesiumGeoreference))
+    {
+        UE_LOG(LogSimUdpBridge, Error,
+            TEXT("No ACesiumGeoreference actor found; startup origins will be rejected"));
+    }
 
     if (IsValid(ControlledActor))
     {
@@ -204,6 +234,17 @@ void ASimUdpControlledActor::ReceivePackets()
             break;
         }
 
+        FPendingGeoreference Georeference;
+        if (ParseGeoreferencePacket(Data.GetData(), BytesRead, Georeference))
+        {
+            ++ValidPacketCount;
+            Georeference.Sender = Sender;
+            const bool bApplied = ApplyGeoreference(Georeference);
+            SendAck(*Sender, Georeference.RunId, 0,
+                bApplied ? SimUdpProtocol::AckApplied : SimUdpProtocol::AckApplyFailed);
+            continue;
+        }
+
         FPendingPose Candidate;
         if (!ParsePosePacket(Data.GetData(), BytesRead, Candidate))
         {
@@ -215,23 +256,12 @@ void ASimUdpControlledActor::ReceivePackets()
         ++ValidPacketCount;
         Candidate.Sender = Sender;
 
-        if (!bHasActiveRun || Candidate.RunId != ActiveRunId)
+        if (!bHasActiveRun || !bHasGeoreference || Candidate.RunId != ActiveRunId)
         {
-            if (bHasActiveRun && !Candidate.bStartOfRun)
-            {
-                ++RejectedPacketCount;
-                SendAck(*Sender, Candidate.RunId, Candidate.Sequence,
-                    SimUdpProtocol::AckRejected);
-                continue;
-            }
-
-            ActiveRunId = Candidate.RunId;
-            bHasActiveRun = true;
-            bHasAppliedSequence = false;
-            PendingPose.Reset();
-            UE_LOG(LogSimUdpBridge, Display,
-                TEXT("Started SIL run 0x%016llX"),
-                static_cast<unsigned long long>(ActiveRunId));
+            ++RejectedPacketCount;
+            SendAck(*Sender, Candidate.RunId, Candidate.Sequence,
+                SimUdpProtocol::AckRejected);
+            continue;
         }
 
         if (bHasAppliedSequence && Candidate.Sequence == LastAppliedSequenceRaw)
@@ -254,6 +284,69 @@ void ASimUdpControlledActor::ReceivePackets()
 
         PendingPose = MoveTemp(Candidate);
     }
+}
+
+bool ASimUdpControlledActor::ParseGeoreferencePacket(
+    const uint8* Data,
+    int32 NumBytes,
+    FPendingGeoreference& OutGeoreference) const
+{
+    using namespace SimUdpProtocol;
+
+    if (NumBytes != GeoreferencePacketSize ||
+        FMemory::Memcmp(Data, GeoreferenceMagic, 4) != 0 ||
+        Data[4] != Version || Data[5] != 0 || ReadU16BE(Data + 6) != 0)
+    {
+        return false;
+    }
+
+    OutGeoreference.RunId = ReadU64BE(Data + 8);
+    OutGeoreference.LatitudeDegrees = ReadDoubleBE(Data + 16);
+    OutGeoreference.LongitudeDegrees = ReadDoubleBE(Data + 24);
+    OutGeoreference.EllipsoidHeightMetres = ReadDoubleBE(Data + 32);
+
+    return OutGeoreference.RunId != 0 &&
+        FMath::IsFinite(OutGeoreference.LatitudeDegrees) &&
+        FMath::IsFinite(OutGeoreference.LongitudeDegrees) &&
+        FMath::IsFinite(OutGeoreference.EllipsoidHeightMetres) &&
+        OutGeoreference.LatitudeDegrees >= -90.0 &&
+        OutGeoreference.LatitudeDegrees <= 90.0 &&
+        OutGeoreference.LongitudeDegrees >= -180.0 &&
+        OutGeoreference.LongitudeDegrees <= 180.0;
+}
+
+bool ASimUdpControlledActor::ApplyGeoreference(
+    const FPendingGeoreference& Georeference)
+{
+    if (!IsValid(CesiumGeoreference))
+    {
+        UE_LOG(LogSimUdpBridge, Error,
+            TEXT("CesiumGeoreference is unset; startup origin was rejected"));
+        return false;
+    }
+
+    UE_LOG(LogSimUdpBridge, Verbose,
+        TEXT("Applying Cesium origin through actor '%s'"),
+        *CesiumGeoreference->GetName());
+
+    CesiumGeoreference->SetOriginLongitudeLatitudeHeight(
+        FVector(
+            Georeference.LongitudeDegrees,
+            Georeference.LatitudeDegrees,
+            Georeference.EllipsoidHeightMetres));
+
+    ActiveRunId = Georeference.RunId;
+    bHasActiveRun = true;
+    bHasGeoreference = true;
+    bHasAppliedSequence = false;
+    PendingPose.Reset();
+    UE_LOG(LogSimUdpBridge, Display,
+        TEXT("Started SIL run 0x%016llX at lat %.9f lon %.9f height %.3f m"),
+        static_cast<unsigned long long>(ActiveRunId),
+        Georeference.LatitudeDegrees,
+        Georeference.LongitudeDegrees,
+        Georeference.EllipsoidHeightMetres);
+    return true;
 }
 
 bool ASimUdpControlledActor::ParsePosePacket(

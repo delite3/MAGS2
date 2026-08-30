@@ -6,6 +6,37 @@ release version.
 
 ## Pose command
 
+Each run begins with one georeference startup packet before any pose commands.
+
+## Georeference startup
+
+The startup datagram is exactly 40 bytes.
+
+| Offset | Type | Meaning |
+| ---: | --- | --- |
+| 0 | 4 bytes | `SGRF` georeference magic |
+| 4 | `uint8` | pose protocol version (`2`) |
+| 5 | `uint8` | flags; must be zero |
+| 6 | `uint16` | reserved; must be zero |
+| 8 | `uint64` | nonzero run ID |
+| 16 | `float64` | origin latitude in degrees |
+| 24 | `float64` | origin longitude in degrees |
+| 32 | `float64` | WGS84 ellipsoid origin height in metres |
+
+Unreal applies this packet with Cesium's atomic
+`SetOriginLongitudeLatitudeHeight(longitude, latitude, height)` call and sends
+an `Applied` ACK with sequence zero. Pose packets are rejected until this
+startup packet succeeds.
+
+The sender's `--altitude` is the Cesium WGS84 ellipsoid origin height. It is
+not a local profile Z offset. `--object-height` independently supplies the Z
+coordinate of every generated profile pose and defaults to zero metres.
+
+The optional trajectory CSV is a Python input format, not part of this wire
+protocol. The sender converts each interpolated roll/pitch/yaw pose to the same
+quaternion field already present in every pose command, so no Unreal-side
+protocol or plugin change is required.
+
 Each UDP command is exactly 56 bytes.
 
 | Offset | Type | Meaning |
@@ -92,8 +123,17 @@ so compiler padding and host endianness do not affect the contract.
 
 - Wire positions are metres; Unreal world positions are centimetres.
 - The bridge multiplies position by 100 at the boundary.
-- Axes are X forward, Y right, Z up.
+- At the Cesium cartographic origin, Unreal +X is east, +Y is south, and +Z is
+  up. The path generator treats +X as its initial vehicle-forward direction.
 - Quaternion components are ordered X, Y, Z, W.
+- CSV orientation is specified in degrees using Unreal's Transform convention:
+  roll about X, pitch about Y, and yaw about Z. The sender interpolates the
+  converted quaternions along the shortest rotational arc.
+- Georeference coordinates are WGS84 latitude/longitude/ellipsoid height.
+- Object height is a local +Z tangent-frame offset, not ellipsoid altitude,
+  mean-sea-level height, or terrain AGL. The current profiles hold it constant
+  while changing X and Y, which is not constant geodetic altitude over large
+  distances.
 
 ## Timestamp interpretation
 

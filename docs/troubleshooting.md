@@ -77,6 +77,23 @@ Verify in this order:
 HTTP Remote Control on port 30010 is the superseded prototype and is unrelated
 to the active UDP/TCP listeners.
 
+## The sender times out waiting for the georeference ACK
+
+The sender intentionally transmits no pose commands until Unreal confirms the
+Cesium origin. Check all of these:
+
+```text
+Cesium Georeference:      CesiumGeoreference0 (not None)
+Send Acknowledgements:    enabled
+Origin Placement:         Longitude / Latitude / Height
+Ellipsoid:                WGS84
+```
+
+Also confirm that the copied plugin was rebuilt with the editor closed and the
+UDP listener belongs to that rebuilt DLL. A startup ACK confirms the origin
+setter ran; it does not confirm that Cesium terrain or 3D tiles have finished
+loading.
+
 ## The cone does not move
 
 Check the pose actor and target:
@@ -90,8 +107,35 @@ Simulate Physics: Off
 Also confirm the UDP listener log and that Python receives ACKs. A sender
 process running without applied ACKs proves only that it emitted datagrams.
 
-With relative positioning enabled, Z=1 means one metre above the authored
-location. Stopping PIE restores the authored state; that is expected.
+The sender's `--altitude` sets Cesium's WGS84 ellipsoid origin height; it does
+not raise the profile locally. Use `--object-height` for the cone's local +Z
+position in metres. Keep both relative transform options disabled for these
+absolute local poses. Stopping PIE restores the authored state; that is
+expected.
+
+## The cone points in the wrong direction
+
+The sender assumes the controlled mesh's forward direction is local Unreal +X.
+For a built-in path, use `--yaw-offset` to correct a consistently rotated mesh.
+For a CSV trajectory, adjust `yaw_deg` in the file. Keep `Rotation Relative To
+Start` disabled so the commanded pose remains unambiguous.
+
+Roll, pitch, and yaw use the same degree convention shown in Unreal's Transform
+panel. They are converted to quaternions before transmission, so interpolation
+does not jump at the 360/0-degree boundary.
+
+## A trajectory CSV is rejected
+
+The required header is exactly:
+
+```text
+time_s,x_m,y_m,z_m,roll_deg,pitch_deg,yaw_deg
+```
+
+The file must contain at least two numeric, finite poses. Its first `time_s`
+must be zero and every later time must be strictly greater than the previous
+one. The CSV supplies complete poses, so do not combine `--trajectory` with
+`--object-height`, `--roll`, `--pitch`, or `--yaw-offset`.
 
 ## No camera frames arrive
 

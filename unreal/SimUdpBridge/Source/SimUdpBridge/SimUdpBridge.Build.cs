@@ -11,7 +11,8 @@ public class SimUdpBridge : ModuleRules
             {
                 "Core",
                 "CoreUObject",
-                "Engine"
+                "Engine",
+                "CesiumRuntime"
             }
         );
 

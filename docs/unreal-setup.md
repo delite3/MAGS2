@@ -13,8 +13,10 @@ C:\Users\hda\Documents\Unreal Projects\AM
 ## 1. Build prerequisites
 
 Use Visual Studio 2022 with the MSVC and Windows SDK components selected by
-Unreal. If UnrealBuildTool reports a missing `NetFxSDK`, install these Visual
-Studio Individual components:
+Unreal. Cesium for Unreal must also be installed for UE 5.8 and enabled in the
+`AM` project because the bridge links against the `CesiumRuntime` module.
+If UnrealBuildTool reports a missing `NetFxSDK`, install these Visual Studio
+Individual components:
 
 - .NET Framework 4.8 SDK
 - .NET Framework 4.8 targeting pack, if offered separately
@@ -71,34 +73,49 @@ AM\Plugins\SimUdpBridge\Binaries\Win64\UnrealEditor-SimUdpBridge.dll
 ## 4. Configure the controlled actor
 
 1. Open `AM.uproject`.
-2. Select **Edit > Plugins**, search for **SIL UDP Bridge**, and confirm it is
-   enabled. Restart when requested.
-3. Select the traffic cone and configure:
+2. Select **Edit > Plugins** and confirm both **Cesium for Unreal** and
+   **SIL UDP Bridge** are enabled. Restart when requested.
+3. Select `CesiumGeoreference0` in the World Outliner and verify:
+
+   ```text
+   Origin Placement:  Longitude / Latitude / Height
+   Ellipsoid:         WGS84
+   ```
+
+   The latitude, longitude, and Origin Height visible here are editor preview
+   values. Each Python run replaces all three after PIE starts. Origin Height
+   remains the official user-facing WGS84 ellipsoid altitude; it is not the
+   traffic cone's local height.
+4. Select the traffic cone and configure:
 
    ```text
    Mobility:         Movable
    Simulate Physics: Off
    ```
 
-4. In **Place Actors**, add **Sim Udp Controlled Actor**.
-5. Rename it `SimUdpBridge` in the World Outliner.
-6. In **SIL UDP**, configure:
+5. In **Place Actors**, add **Sim Udp Controlled Actor**.
+6. Rename it `SimUdpBridge` in the World Outliner.
+7. In **SIL UDP**, configure:
 
    ```text
    Controlled Actor:            traffic cone
+   Cesium Georeference:         CesiumGeoreference0
    Bind Address:                0.0.0.0
    Listen Port:                 5005
-   Position Relative To Start:  enabled
-   Rotation Relative To Start:  enabled
+   Position Relative To Start:  disabled
+   Rotation Relative To Start:  disabled
    Send Acknowledgements:       enabled
    ```
 
-7. Save the level.
-8. In **Editor Preferences > General > Performance**, disable **Use Less CPU
+8. Save the level.
+9. In **Editor Preferences > General > Performance**, disable **Use Less CPU
    when in Background** for consistent external-loop timing.
 
-Relative position makes `(0, 0, 1)` mean one metre above the authored cone
-location. Physics must remain disabled because it can overwrite the directly
+The georeference startup packet sets `CesiumGeoreference0` to the sender's
+latitude, longitude, and WGS84 ellipsoid height. Keep both relative transform
+options disabled so the profile origin is local `(0, 0, 0)` at that Cesium
+origin. The sender's independent object height becomes the pose's local +Z
+coordinate. Physics must remain disabled because it can overwrite the directly
 commanded transform on the next physics step.
 
 ## 5. Configure the camera actor
@@ -174,14 +191,18 @@ First send a slow hover command:
 python3 ue_udp_sender.py \
   --host "$UE_HOST" \
   --path hover \
-  --altitude 1 \
+  --latitude 48.8566 \
+  --longitude 2.3522 \
+  --altitude 35.5 \
+  --object-height 2 \
   --rate 5 \
   --duration 3
 ```
 
 Expected evidence:
 
-- The cone moves one metre upward relative to its authored location.
+- The Cesium origin is set to the supplied coordinates and the cone is placed
+  at local Unreal Z = 200 cm, two metres above that origin.
 - Unreal logs a new hexadecimal run ID.
 - Python reports applied ACK counts and latency statistics.
 - Stopping PIE restores the authored level state.
@@ -207,7 +228,10 @@ While the receiver runs, send motion from another terminal:
 python3 ue_udp_sender.py \
   --host "$UE_HOST" \
   --path circle \
-  --altitude 2 \
+  --latitude 48.8566 \
+  --longitude 2.3522 \
+  --altitude 35.5 \
+  --object-height 2 \
   --radius 2 \
   --period 8 \
   --rate 30 \
@@ -217,6 +241,26 @@ python3 ue_udp_sender.py \
 Successful camera evidence includes valid level images, increasing frame IDs,
 no non-monotonic IDs, and pose metadata changing to the active run and applied
 sequence after motion begins.
+
+To verify a user-authored position and orientation profile, no plugin rebuild or
+new actor setup is needed. Keep both relative transform options disabled and
+run:
+
+```bash
+python3 ue_udp_sender.py \
+  --host "$UE_HOST" \
+  --trajectory examples/pose_trajectory.csv \
+  --latitude 48.8566 \
+  --longitude 2.3522 \
+  --altitude 35.5 \
+  --rate 30
+```
+
+Watch the cone translate and rotate through all five keyframes. The file's XYZ
+values are metres in the local Cesium tangent frame; its roll, pitch, and yaw
+values are Unreal Transform degrees. If the mesh's visual nose is not local +X,
+correct the yaw values in the CSV rather than changing the bridge actor's
+relative-rotation setting.
 
 ## 8. Enable pose-correlated capture
 
@@ -238,7 +282,7 @@ receive image N -> run CV -> send pose N+1 -> receive tagged image N+1
 ## Optional OpenCV display
 
 Receiving and saving frames has no third-party Python dependency. For display,
-install `requirements-display.txt` in a Python 3.10+ environment, then run:
+install `requirements.txt` in a Python 3.10+ environment, then run:
 
 ```bash
 python3 ue_camera_receiver.py \

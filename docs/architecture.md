@@ -3,10 +3,10 @@
 ## Data flow
 
 ```text
-Python path generator
-    -> 56-byte UDP command
+Python built-in path or CSV pose-trajectory generator
+    -> 40-byte georeference startup packet, then 56-byte UDP commands
 Windows UDP socket in Unreal
-    -> validate and retain newest sequence
+    -> set Cesium origin, then validate and retain newest sequence
 Unreal PrePhysics tick on the game thread
     -> apply controlled-actor transform
     -> send 20-byte applied ACK
@@ -42,14 +42,34 @@ evidence by itself.
 
 ## Run and sequence identity
 
+The sender first transmits one georeference startup packet containing latitude,
+longitude, and WGS84 ellipsoid height. Unreal acknowledges it only after
+setting the Cesium origin; pose packets for that run are rejected until this
+step succeeds. The movement-profile clock starts after this acknowledgement,
+so an origin retry cannot skip the beginning of a run.
+
 Every sender invocation uses a random nonzero 64-bit run ID unless one is
 provided explicitly. Sequences start again at one inside each run. The pair
 `(run_id, sequence)` is therefore the command identity; a sequence number alone
 is not globally unique.
 
-The first packet in a run carries the start-of-run flag. Unreal can accept a
-new sender run without confusing its low sequence numbers with stale packets
-from an earlier run.
+The first pose packet in a run carries the start-of-run flag. The georeference
+packet establishes the run before that pose arrives.
+
+## Pose generation
+
+The UDP wire format always carries a complete local pose: XYZ position plus an
+XYZW quaternion. Two Python-side sources now produce that same command:
+
+- `--path` generates line, circle, or hover motion. Roll and pitch are constant;
+  yaw follows the path heading plus the requested yaw offset.
+- `--trajectory` loads time-stamped XYZ and roll/pitch/yaw rows from CSV.
+  Position is linearly interpolated and orientation uses shortest-path SLERP.
+
+CSV timestamps describe the intended simulation trajectory. They do not need
+to match the send rate: the sender evaluates the continuous interpolated pose
+at each `--rate` interval. The path file is therefore a set of keyframes, not a
+packet log.
 
 ## Why TCP for camera frames
 
@@ -89,10 +109,21 @@ enabled, the actor sends at most one image for each distinct applied pose.
 
 - Wire positions are metres.
 - Unreal positions are centimetres; conversion occurs at the plugin boundary.
-- Axes are X forward, Y right, Z up.
+- At Cesium's cartographic origin, Unreal +X is east, +Y is south, and +Z is up.
+  The current profiles consequently begin facing east along +X.
+- The georeference altitude sets the WGS84 ellipsoid origin. The independently
+  commanded object height becomes the pose's local +Z coordinate.
 - Quaternions use X/Y/Z/W order.
+- User-authored orientation uses Unreal Transform degrees: roll about X, pitch
+  about Y, and yaw about Z, converted with Unreal's `FRotator` convention.
 - The POC applies kinematic pose with teleport semantics. It does not calculate
   velocity, force, aerodynamic response, or rigid-body dynamics.
+
+The path profiles operate in this local tangent frame. Holding object height
+constant while moving X/Y is therefore not exactly the same as holding
+ellipsoid altitude constant over large distances. That distinction is
+negligible for the small POC paths, but a later wide-area simulation should
+command cartographic vehicle coordinates or use a Cesium Globe Anchor.
 
 The Python and Windows monotonic clocks do not share an epoch. Raw camera and
 sender timestamps must not be subtracted to claim cross-process latency. Pose
